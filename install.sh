@@ -58,11 +58,11 @@ get_dest_dir() {
         return
     fi
 
-    # Try /usr/local/bin first
-    if [ -w /usr/local/bin ] || sudo -n true 2>/dev/null; then
+    # Try /usr/local/bin only if writable without sudo
+    if [ -w /usr/local/bin ]; then
         echo "/usr/local/bin"
     else
-        # Fallback to user bin
+        # Fallback to user-writable directory
         USER_BIN="$HOME/.local/bin"
         mkdir -p "$USER_BIN"
         echo "$USER_BIN"
