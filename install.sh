@@ -7,6 +7,7 @@ set -e
 VERSION="${1:-latest}"
 DEST_DIR="${2:-}"
 GITHUB_REPO="franchise-factory/devflow-releases"
+NEED_SUDO=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -17,6 +18,15 @@ NC='\033[0m' # No Color
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# Run a command with sudo if needed
+maybe_sudo() {
+    if [ "$NEED_SUDO" = true ]; then
+        sudo "$@"
+    else
+        "$@"
+    fi
+}
 
 # Detect OS and architecture
 detect_platform() {
@@ -59,7 +69,10 @@ get_dest_dir() {
     fi
 
     # Try /usr/local/bin first
-    if [ -w /usr/local/bin ] || sudo -n true 2>/dev/null; then
+    if [ -w /usr/local/bin ]; then
+        echo "/usr/local/bin"
+    elif sudo -n true 2>/dev/null; then
+        NEED_SUDO=true
         echo "/usr/local/bin"
     else
         # Fallback to user bin
@@ -74,6 +87,7 @@ download_binary() {
     local version="$1"
     local dest_dir="$2"
     local binary_name="$3"
+    local tmp_file="/tmp/devflow-download-$$"
 
     if [ "$version" = "latest" ]; then
         DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${binary_name}"
@@ -82,10 +96,11 @@ download_binary() {
     fi
 
     info "Downloading DevFlow from $DOWNLOAD_URL"
-    curl -fsSL "$DOWNLOAD_URL" -o "$dest_dir/devflow"
 
-    # Make executable
-    chmod +x "$dest_dir/devflow"
+    # Always download to temp first, then move with appropriate permissions
+    curl -fsSL "$DOWNLOAD_URL" -o "$tmp_file"
+    maybe_sudo mv "$tmp_file" "$dest_dir/devflow"
+    maybe_sudo chmod +x "$dest_dir/devflow"
 }
 
 # Verify checksum
@@ -102,37 +117,44 @@ verify_checksum() {
         CHECKSUM_URL="https://github.com/${GITHUB_REPO}/releases/download/${version}/checksums.txt"
     fi
 
-    curl -fsSL "$CHECKSUM_URL" -o /tmp/checksums.txt
+    curl -fsSL "$CHECKSUM_URL" -o /tmp/devflow-checksums.txt
 
     # Get checksum for our binary
-    EXPECTED=$(grep "$binary_name" /tmp/checksums.txt | awk '{print $1}')
-    ACTUAL=$(sha256sum "$dest_dir/devflow" | awk '{print $1}')
+    EXPECTED=$(grep "$binary_name" /tmp/devflow-checksums.txt | awk '{print $1}')
+
+    # Use sha256sum or shasum depending on platform
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL=$(sha256sum "$dest_dir/devflow" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL=$(shasum -a 256 "$dest_dir/devflow" | awk '{print $1}')
+    else
+        warn "No sha256sum or shasum found, skipping checksum verification"
+        rm -f /tmp/devflow-checksums.txt
+        return
+    fi
 
     if [ "$EXPECTED" != "$ACTUAL" ]; then
         error "Checksum mismatch! Expected: $EXPECTED, Got: $ACTUAL"
     fi
 
     info "Checksum verified"
-    rm -f /tmp/checksums.txt
+    rm -f /tmp/devflow-checksums.txt
 }
 
 # Update PATH if needed
 update_path() {
     local dest_dir="$1"
 
-    case "$dest_dir" in
-        /usr/local/bin)
-            # Standard location, should already be in PATH
-            ;;
-        ~/.local/bin)
-            if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
-                warn "Adding $HOME/.local/bin to PATH"
-                echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$HOME/.bashrc"
-                echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$HOME/.zshrc" 2>/dev/null || true
-                info "Please restart your shell or run: export PATH=\"\$HOME/.local/bin:\$PATH\""
-            fi
-            ;;
-    esac
+    if [ "$dest_dir" = "/usr/local/bin" ]; then
+        return
+    fi
+
+    if ! echo "$PATH" | grep -q "$dest_dir"; then
+        warn "Adding $dest_dir to PATH"
+        echo "export PATH=\"$dest_dir:\$PATH\"" >> "$HOME/.bashrc"
+        echo "export PATH=\"$dest_dir:\$PATH\"" >> "$HOME/.zshrc" 2>/dev/null || true
+        info "Please restart your shell or run: export PATH=\"$dest_dir:\$PATH\""
+    fi
 }
 
 # Main installation
@@ -146,12 +168,12 @@ main() {
     DEST_DIR=$(get_dest_dir)
     info "Installing to: $DEST_DIR"
 
+    if [ "$NEED_SUDO" = true ]; then
+        info "Using sudo for installation to $DEST_DIR"
+    fi
+
     download_binary "$VERSION" "$DEST_DIR" "$BINARY_NAME"
     verify_checksum "$DEST_DIR" "$VERSION" "$BINARY_NAME"
-
-    # Rename binary
-    mv "$DEST_DIR/devflow" "$DEST_DIR/devflow-$BINARY_NAME"
-    ln -sf "$DEST_DIR/devflow-$BINARY_NAME" "$DEST_DIR/devflow"
 
     update_path "$DEST_DIR"
 
