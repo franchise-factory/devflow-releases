@@ -7,7 +7,6 @@ set -e
 VERSION="${1:-latest}"
 DEST_DIR="${2:-}"
 GITHUB_REPO="franchise-factory/devflow-releases"
-NEED_SUDO=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -18,15 +17,6 @@ NC='\033[0m' # No Color
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-
-# Run a command with sudo if needed
-maybe_sudo() {
-    if [ "$NEED_SUDO" = true ]; then
-        sudo "$@"
-    else
-        "$@"
-    fi
-}
 
 # Detect OS and architecture
 detect_platform() {
@@ -68,14 +58,10 @@ get_dest_dir() {
         return
     fi
 
-    # Try /usr/local/bin first
+    # Use /usr/local/bin only if directly writable, otherwise ~/.local/bin
     if [ -w /usr/local/bin ]; then
         echo "/usr/local/bin"
-    elif sudo -n true 2>/dev/null; then
-        NEED_SUDO=true
-        echo "/usr/local/bin"
     else
-        # Fallback to user bin
         USER_BIN="$HOME/.local/bin"
         mkdir -p "$USER_BIN"
         echo "$USER_BIN"
@@ -87,7 +73,6 @@ download_binary() {
     local version="$1"
     local dest_dir="$2"
     local binary_name="$3"
-    local tmp_file="/tmp/devflow-download-$$"
 
     if [ "$version" = "latest" ]; then
         DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${binary_name}"
@@ -96,11 +81,8 @@ download_binary() {
     fi
 
     info "Downloading DevFlow from $DOWNLOAD_URL"
-
-    # Always download to temp first, then move with appropriate permissions
-    curl -fsSL "$DOWNLOAD_URL" -o "$tmp_file"
-    maybe_sudo mv "$tmp_file" "$dest_dir/devflow"
-    maybe_sudo chmod +x "$dest_dir/devflow"
+    curl -fsSL "$DOWNLOAD_URL" -o "$dest_dir/devflow"
+    chmod +x "$dest_dir/devflow"
 }
 
 # Verify checksum
@@ -167,10 +149,6 @@ main() {
 
     DEST_DIR=$(get_dest_dir)
     info "Installing to: $DEST_DIR"
-
-    if [ "$NEED_SUDO" = true ]; then
-        info "Using sudo for installation to $DEST_DIR"
-    fi
 
     download_binary "$VERSION" "$DEST_DIR" "$BINARY_NAME"
     verify_checksum "$DEST_DIR" "$VERSION" "$BINARY_NAME"
