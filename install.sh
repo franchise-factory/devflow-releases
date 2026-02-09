@@ -58,10 +58,11 @@ get_dest_dir() {
         return
     fi
 
-    # Use /usr/local/bin only if directly writable, otherwise ~/.local/bin
-    if [ -w /usr/local/bin ]; then
+    # Try /usr/local/bin first
+    if [ -w /usr/local/bin ] || sudo -n true 2>/dev/null; then
         echo "/usr/local/bin"
     else
+        # Fallback to user bin
         USER_BIN="$HOME/.local/bin"
         mkdir -p "$USER_BIN"
         echo "$USER_BIN"
@@ -80,8 +81,26 @@ download_binary() {
         DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${version}/${binary_name}"
     fi
 
+    # Check available disk space (need ~20MB)
+    local available_kb
+    available_kb=$(df -k "$dest_dir" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$available_kb" ] && [ "$available_kb" -lt 20480 ]; then
+        error "Insufficient disk space. Available: ${available_kb}KB, Required: ~20MB."
+    fi
+
     info "Downloading DevFlow from $DOWNLOAD_URL"
-    curl -fsSL "$DOWNLOAD_URL" -o "$dest_dir/devflow"
+
+    # Download to temp file first to avoid partial writes and pipe conflicts
+    # The </dev/null detaches stdin, preventing issues when run via curl | bash
+    local tmp_file
+    tmp_file=$(mktemp /tmp/devflow-download.XXXXXX)
+
+    if ! curl -fsSL "$DOWNLOAD_URL" -o "$tmp_file" </dev/null; then
+        rm -f "$tmp_file"
+        error "Download failed. Try manually: curl -fsSL '$DOWNLOAD_URL' -o '$dest_dir/devflow'"
+    fi
+
+    mv "$tmp_file" "$dest_dir/devflow"
     chmod +x "$dest_dir/devflow"
 }
 
@@ -99,44 +118,38 @@ verify_checksum() {
         CHECKSUM_URL="https://github.com/${GITHUB_REPO}/releases/download/${version}/checksums.txt"
     fi
 
-    curl -fsSL "$CHECKSUM_URL" -o /tmp/devflow-checksums.txt
+    # The </dev/null detaches stdin, preventing issues when run via curl | bash
+    curl -fsSL "$CHECKSUM_URL" -o /tmp/checksums.txt </dev/null
 
     # Get checksum for our binary
-    EXPECTED=$(grep "$binary_name" /tmp/devflow-checksums.txt | awk '{print $1}')
-
-    # Use sha256sum or shasum depending on platform
-    if command -v sha256sum >/dev/null 2>&1; then
-        ACTUAL=$(sha256sum "$dest_dir/devflow" | awk '{print $1}')
-    elif command -v shasum >/dev/null 2>&1; then
-        ACTUAL=$(shasum -a 256 "$dest_dir/devflow" | awk '{print $1}')
-    else
-        warn "No sha256sum or shasum found, skipping checksum verification"
-        rm -f /tmp/devflow-checksums.txt
-        return
-    fi
+    EXPECTED=$(grep "$binary_name" /tmp/checksums.txt | awk '{print $1}')
+    ACTUAL=$(sha256sum "$dest_dir/devflow" | awk '{print $1}')
 
     if [ "$EXPECTED" != "$ACTUAL" ]; then
         error "Checksum mismatch! Expected: $EXPECTED, Got: $ACTUAL"
     fi
 
     info "Checksum verified"
-    rm -f /tmp/devflow-checksums.txt
+    rm -f /tmp/checksums.txt
 }
 
 # Update PATH if needed
 update_path() {
     local dest_dir="$1"
 
-    if [ "$dest_dir" = "/usr/local/bin" ]; then
-        return
-    fi
-
-    if ! echo "$PATH" | grep -q "$dest_dir"; then
-        warn "Adding $dest_dir to PATH"
-        echo "export PATH=\"$dest_dir:\$PATH\"" >> "$HOME/.bashrc"
-        echo "export PATH=\"$dest_dir:\$PATH\"" >> "$HOME/.zshrc" 2>/dev/null || true
-        info "Please restart your shell or run: export PATH=\"$dest_dir:\$PATH\""
-    fi
+    case "$dest_dir" in
+        /usr/local/bin)
+            # Standard location, should already be in PATH
+            ;;
+        ~/.local/bin)
+            if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
+                warn "Adding $HOME/.local/bin to PATH"
+                echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$HOME/.bashrc"
+                echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$HOME/.zshrc" 2>/dev/null || true
+                info "Please restart your shell or run: export PATH=\"\$HOME/.local/bin:\$PATH\""
+            fi
+            ;;
+    esac
 }
 
 # Main installation
@@ -153,6 +166,10 @@ main() {
     download_binary "$VERSION" "$DEST_DIR" "$BINARY_NAME"
     verify_checksum "$DEST_DIR" "$VERSION" "$BINARY_NAME"
 
+    # Rename binary
+    mv "$DEST_DIR/devflow" "$DEST_DIR/devflow-$BINARY_NAME"
+    ln -sf "$DEST_DIR/devflow-$BINARY_NAME" "$DEST_DIR/devflow"
+
     update_path "$DEST_DIR"
 
     info "Installation complete!"
@@ -161,4 +178,4 @@ main() {
     info "Run 'devflow --help' to get started"
 }
 
-main
+main "$@"
